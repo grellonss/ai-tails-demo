@@ -1,363 +1,244 @@
 /**
- * AI-Tails: Feline Grimace Scale (FGS) Clinical Analyzer
- * Client JavaScript Application
+ * AI-Tails: multimodal analysis client (RGB photo + thermal photo).
  */
 
 document.addEventListener("DOMContentLoaded", () => {
-  // DOM Elements
-  const dropzone = document.getElementById("uploadDropzone");
-  const fileInput = document.getElementById("fileInput");
-  const canvas = document.getElementById("catCanvas");
-  const ctx = canvas.getContext("2d");
-  const emptyState = document.getElementById("canvasEmptyState");
-  const analyzeBtn = document.getElementById("analyzeBtn");
-  const btnText = document.getElementById("btnText");
-  const btnSpinner = document.getElementById("btnSpinner");
-  const catNameInput = document.getElementById("catNameInput");
-  const toggleLandmarks = document.getElementById("toggleLandmarks");
-  const toggleLines = document.getElementById("toggleLines");
-  const profilePreset = document.getElementById("profilePreset");
-  const apiUrlInput = document.getElementById("apiUrlInput");
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("catCanvas"), ctx = canvas.getContext("2d");
+  const tCanvas = $("thermalCanvas"), tctx = tCanvas.getContext("2d");
+  const CIRCUMFERENCE = 2 * Math.PI * 40;
+  const LEVEL_COLOR = { good: "var(--status-good)", medium: "var(--status-medium)", poor: "var(--status-poor)" };
 
-  // Output Elements
-  const verdictBanner = document.getElementById("verdictBanner");
-  const verdictBadge = document.getElementById("verdictBadge");
-  const verdictTitle = document.getElementById("verdictTitle");
-  const verdictSubtitle = document.getElementById("verdictSubtitle");
-  const verdictAdvice = document.getElementById("verdictAdvice");
-  const gaugeScoreNum = document.getElementById("gaugeScoreNum");
-  const gaugeProgress = document.getElementById("gaugeProgress");
-  const scorePercentLabel = document.getElementById("scorePercentLabel");
+  const state = { rgbFile: null, rgbImg: null, thermalFile: null, thermalImg: null, result: null, chat: [] };
 
-  const earScoreBadge = document.getElementById("earScoreBadge");
-  const earMetric = document.getElementById("earMetric");
-  const earDesc = document.getElementById("earDesc");
+  // ---------------------------------------------------------------------------
+  // Component status (header)
+  // ---------------------------------------------------------------------------
+  fetch("/api/health").then((r) => r.json()).then((h) => {
+    document.querySelectorAll("#statusPills .status-pill").forEach((pill) => {
+      const ok = h[pill.dataset.key];
+      pill.classList.toggle("off", !ok);
+      pill.title = ok ? "configured" : "not configured (see .env)";
+    });
+  }).catch(() => {});
 
-  const eyeScoreBadge = document.getElementById("eyeScoreBadge");
-  const eyeMetric = document.getElementById("eyeMetric");
-  const eyeDesc = document.getElementById("eyeDesc");
+  // ---------------------------------------------------------------------------
+  // File upload (click, drag & drop, paste)
+  // ---------------------------------------------------------------------------
+  function setupDropzone(zoneId, inputId, onFile) {
+    const zone = $(zoneId), input = $(inputId);
+    zone.addEventListener("click", () => input.click());
+    zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("dragover"); });
+    zone.addEventListener("dragleave", () => zone.classList.remove("dragover"));
+    zone.addEventListener("drop", (e) => {
+      e.preventDefault(); zone.classList.remove("dragover");
+      if (e.dataTransfer.files.length) onFile(e.dataTransfer.files[0]);
+    });
+    input.addEventListener("change", (e) => { if (e.target.files.length) onFile(e.target.files[0]); });
+  }
 
-  const muzzleScoreBadge = document.getElementById("muzzleScoreBadge");
-  const muzzleMetric = document.getElementById("muzzleMetric");
-  const muzzleDesc = document.getElementById("muzzleDesc");
-
-  const swrlRuleCode = document.getElementById("swrlRuleCode");
-  const reasonerTime = document.getElementById("reasonerTime");
-
-  // App State
-  let currentImage = null;
-  let currentFile = null;
-  let currentLandmarks = null;
-  const CIRCLE_CIRCUMFERENCE = 2 * Math.PI * 40; // r = 40 in SVG
-
-  // =========================================================================
-  // Drag and Drop & File Upload
-  // =========================================================================
-
-  dropzone.addEventListener("click", () => fileInput.click());
-
-  dropzone.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    dropzone.classList.add("dragover");
-  });
-
-  dropzone.addEventListener("dragleave", () => {
-    dropzone.classList.remove("dragover");
-  });
-
-  dropzone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    dropzone.classList.remove("dragover");
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleSelectedFile(e.dataTransfer.files[0]);
-    }
-  });
-
-  fileInput.addEventListener("change", (e) => {
-    if (e.target.files && e.target.files.length > 0) {
-      handleSelectedFile(e.target.files[0]);
-    }
-  });
-
-  // Support paste from clipboard (Ctrl + V)
-  document.addEventListener("paste", (e) => {
-    const items = (e.clipboardData || e.originalEvent.clipboardData).items;
-    for (let item of items) {
-      if (item.kind === "file" && item.type.startsWith("image/")) {
-        const file = item.getAsFile();
-        handleSelectedFile(file);
-        break;
-      }
-    }
-  });
-
-  function handleSelectedFile(file) {
-    if (!file.type.startsWith("image/")) {
-      alert("Seleziona un file immagine valido (JPEG, PNG, WEBP).");
-      return;
-    }
-
-    currentFile = file;
-    currentLandmarks = null;
-
+  function loadImage(file, done) {
+    if (!file.type.startsWith("image/")) { showError("Select an image file (JPG, PNG, WEBP)."); return; }
     const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        currentImage = img;
-        renderCanvas();
-        emptyState.classList.add("hidden");
-        analyzeBtn.disabled = false;
-        
-        // Auto-extract or preview
-        runAnalysis();
-      };
-      img.src = event.target.result;
-    };
+    reader.onload = (ev) => { const img = new Image(); img.onload = () => done(img); img.src = ev.target.result; };
     reader.readAsDataURL(file);
   }
 
-  // =========================================================================
-  // Canvas Rendering (Image + FGS 48 Landmark Mesh)
-  // =========================================================================
+  const setRgb = (file) => loadImage(file, (img) => {
+    Object.assign(state, { rgbFile: file, rgbImg: img, result: null });
+    $("canvasEmptyState").classList.add("hidden");
+    drawRgb(); updateButton();
+  });
+  const setThermal = (file) => loadImage(file, (img) => {
+    Object.assign(state, { thermalFile: file, thermalImg: img, result: null });
+    $("thermalEmptyState").classList.add("hidden");
+    drawThermal(); updateButton();
+  });
+  setupDropzone("rgbDropzone", "rgbInput", setRgb);
+  setupDropzone("thermalDropzone", "thermalInput", setThermal);
+  document.addEventListener("paste", (e) => {   // paste: RGB photo first, then the thermal one
+    const item = [...(e.clipboardData?.items || [])].find((i) => i.kind === "file" && i.type.startsWith("image/"));
+    if (item) (state.rgbFile ? setThermal : setRgb)(item.getAsFile());
+  });
 
-  function renderCanvas() {
-    if (!currentImage) return;
-
-    // Set canvas dimensions matching source image
-    canvas.width = currentImage.width;
-    canvas.height = currentImage.height;
-
-    // Draw photo
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(currentImage, 0, 0);
-
-    // If landmarks exist and toggle is active, draw mesh overlay
-    if (currentLandmarks && currentLandmarks.length >= 48) {
-      const showMesh = toggleLandmarks.checked;
-      const showLines = toggleLines.checked;
-
-      if (showLines) {
-        drawGeometricLines(currentLandmarks);
-      }
-
-      if (showMesh) {
-        drawLandmarkPoints(currentLandmarks);
-      }
-    }
+  function updateButton() {
+    const ready = state.rgbFile && state.thermalFile;
+    $("analyzeBtn").disabled = !ready;
+    $("btnText").textContent = ready ? "Analyse health status" : "Upload both photos";
   }
 
-  function drawLandmarkPoints(lm) {
-    // Specific FGS Action Unit indices
-    const earPoints = [2, 40];
-    const eyePoints = [8, 10, 12, 14];
-    const muzzlePoints = [30, 32, 35, 37];
-    const headPoints = [0, 25];
+  // ---------------------------------------------------------------------------
+  // Drawing: RGB photo with face box and landmarks, thermal photo with hotspots
+  // ---------------------------------------------------------------------------
+  function drawRgb() {
+    if (!state.rgbImg) return;
+    canvas.width = state.rgbImg.width; canvas.height = state.rgbImg.height;
+    ctx.drawImage(state.rgbImg, 0, 0);
+    const r = state.result;
+    if (!r) return;
+    const s = Math.max(1, canvas.width / 600);
+    const b = r.face.box;
+    ctx.save();
+    ctx.strokeStyle = "#4ade80"; ctx.lineWidth = 1.5 * s; ctx.setLineDash([6 * s, 4 * s]);
+    ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+    ctx.restore();
+    if ($("toggleLines").checked) drawLines(r.landmarks, s);
+    if ($("toggleLandmarks").checked) drawPoints(r.landmarks, s);
+  }
 
-    lm.forEach((pt, idx) => {
+  // indices used by the FGS computation (see DEFAULT_LANDMARK_MAP in vision/detector.py)
+  const GROUPS = { ear: [2, 40], eye: [8, 10, 12, 14], muzzle: [30, 32, 35, 37], head: [0, 25] };
+  const COLORS = { ear: "#06b6d4", eye: "#10b981", muzzle: "#f59e0b", head: "#8b5cf6" };
+
+  function drawPoints(lm, s) {
+    lm.forEach((p, i) => {
+      const group = Object.keys(GROUPS).find((g) => GROUPS[g].includes(i));
       ctx.beginPath();
-      let color = "rgba(255, 255, 255, 0.4)";
-      let radius = Math.max(3, canvas.width * 0.007);
-
-      if (earPoints.includes(idx)) {
-        color = "#06b6d4"; // Cyan
-        radius *= 1.4;
-      } else if (eyePoints.includes(idx)) {
-        color = "#10b981"; // Emerald
-        radius *= 1.4;
-      } else if (muzzlePoints.includes(idx)) {
-        color = "#f59e0b"; // Amber
-        radius *= 1.4;
-      } else if (headPoints.includes(idx)) {
-        color = "#8b5cf6"; // Violet
-        radius *= 1.3;
-      }
-
-      ctx.arc(pt.x, pt.y, radius, 0, 2 * Math.PI);
-      ctx.fillStyle = color;
+      ctx.arc(p.x, p.y, (group ? 5 : 3) * s, 0, 2 * Math.PI);
+      ctx.fillStyle = group ? COLORS[group] : "rgba(255,255,255,0.5)";
       ctx.fill();
-
-      // Outer ring for highlighted Action Units
-      if (earPoints.includes(idx) || eyePoints.includes(idx) || muzzlePoints.includes(idx)) {
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      }
+      if (group) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5 * s; ctx.stroke(); }
     });
   }
 
-  function drawGeometricLines(lm) {
+  function drawLines(lm, s) {
+    const line = (idx, color, dash, close = false) => {
+      ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2 * s; ctx.setLineDash(dash.map((d) => d * s));
+      idx.forEach((i, k) => (k ? ctx.lineTo(lm[i].x, lm[i].y) : ctx.moveTo(lm[i].x, lm[i].y)));
+      if (close) ctx.closePath();
+      ctx.stroke();
+    };
     ctx.save();
-    ctx.lineWidth = Math.max(2, canvas.width * 0.0035);
-
-    // 1. Orecchie (Cyan line connecting ear tips)
-    if (lm[2] && lm[40]) {
-      ctx.strokeStyle = "rgba(6, 182, 212, 0.85)";
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      ctx.moveTo(lm[2].x, lm[2].y);
-      ctx.lineTo(lm[40].x, lm[40].y);
-      ctx.stroke();
-    }
-
-    // 2. Ampiezza Testa (Head span)
-    if (lm[0] && lm[25]) {
-      ctx.strokeStyle = "rgba(139, 92, 246, 0.6)";
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(lm[0].x, lm[0].y);
-      ctx.lineTo(lm[25].x, lm[25].y);
-      ctx.stroke();
-    }
-
-    // 3. Occhi (Eye EAR box)
-    if (lm[8] && lm[10] && lm[12] && lm[14]) {
-      ctx.strokeStyle = "rgba(16, 185, 129, 0.9)";
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.moveTo(lm[8].x, lm[8].y);
-      ctx.lineTo(lm[10].x, lm[10].y);
-      ctx.lineTo(lm[12].x, lm[12].y);
-      ctx.lineTo(lm[14].x, lm[14].y);
-      ctx.closePath();
-      ctx.stroke();
-    }
-
-    // 4. Muso (Muzzle ellipse)
-    if (lm[30] && lm[32] && lm[35] && lm[37]) {
-      ctx.strokeStyle = "rgba(245, 158, 11, 0.85)";
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath();
-      ctx.moveTo(lm[30].x, lm[30].y);
-      ctx.lineTo(lm[37].x, lm[37].y);
-      ctx.lineTo(lm[35].x, lm[35].y);
-      ctx.lineTo(lm[32].x, lm[32].y);
-      ctx.closePath();
-      ctx.stroke();
-    }
-
+    line([2, 40], COLORS.ear, [6, 4]);
+    line([0, 25], COLORS.head, [4, 4]);
+    line([8, 10, 12, 14], COLORS.eye, [], true);
+    line([30, 37, 35, 32], COLORS.muzzle, [5, 3], true);
     ctx.restore();
   }
 
-  // Toggles event listeners
-  toggleLandmarks.addEventListener("change", renderCanvas);
-  toggleLines.addEventListener("change", renderCanvas);
+  function drawThermal() {
+    if (!state.thermalImg) return;
+    tCanvas.width = state.thermalImg.width; tCanvas.height = state.thermalImg.height;
+    tctx.drawImage(state.thermalImg, 0, 0);
+    const t = state.result?.thermal;
+    if (!t) return;
+    const r = Math.max(8, tCanvas.width / 40);
+    tctx.strokeStyle = "#5ff2ff"; tctx.lineWidth = Math.max(2, tCanvas.width / 300);
+    t.hotspots.forEach((p) => { tctx.beginPath(); tctx.arc(p.x, p.y, r, 0, 2 * Math.PI); tctx.stroke(); });
+  }
 
-  // =========================================================================
-  // API Call & Pipeline Execution
-  // =========================================================================
+  ["toggleLandmarks", "toggleLines"].forEach((id) => $(id).addEventListener("change", drawRgb));
 
-  analyzeBtn.addEventListener("click", runAnalysis);
+  // ---------------------------------------------------------------------------
+  // Analysis
+  // ---------------------------------------------------------------------------
+  function showError(msg) {
+    $("errorBox").textContent = msg;
+    $("errorBox").classList.toggle("hidden", !msg);
+  }
 
-  async function runAnalysis() {
-    if (!currentImage) return;
-
-    // Loading state
-    analyzeBtn.disabled = true;
-    btnSpinner.classList.remove("hidden");
-    btnText.textContent = "Inferenza Ontologica in corso...";
-
+  $("analyzeBtn").addEventListener("click", async () => {
+    showError("");
+    $("analyzeBtn").disabled = true; $("btnSpinner").classList.remove("hidden");
+    $("btnText").textContent = "Analysing…";
     try {
-      const catName = catNameInput.value.trim() || "Paziente_Felino";
-      const preset = profilePreset.value;
-      const customApiUrl = apiUrlInput.value.trim();
-
-      const formData = new FormData();
-      if (currentFile) {
-        formData.append("image", currentFile);
-      }
-      formData.append("cat_name", catName);
-      formData.append("profile_preset", preset);
-      formData.append("image_width", currentImage.width);
-      formData.append("image_height", currentImage.height);
-      if (customApiUrl) {
-        formData.append("api_url", customApiUrl);
-      }
-
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        body: formData
-      });
-
-      if (!response.ok) {
-        throw new Error(`Errore server: ${response.statusText}`);
-      }
-
-      const result = await response.json();
-      displayResults(result);
-
+      const form = new FormData();
+      form.append("image", state.rgbFile);
+      form.append("thermal_image", state.thermalFile);
+      form.append("cat_name", $("catNameInput").value.trim() || "Patient");
+      const res = await fetch("/api/analyze", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(`${data.error || res.statusText}${data.step ? ` (step: ${data.step})` : ""}`);
+      state.result = data; state.chat = [];
+      render(data);
     } catch (err) {
-      console.error("Errore analisi:", err);
-      alert(`Si è verificato un errore durante l'analisi: ${err.message}`);
+      showError(err.message);
     } finally {
-      analyzeBtn.disabled = false;
-      btnSpinner.classList.add("hidden");
-      btnText.textContent = "Analizza Stato di Salute";
+      $("btnSpinner").classList.add("hidden");
+      updateButton();
     }
+  });
+
+  function render(d) {
+    drawRgb(); drawThermal();
+    const lvl = d.verdict.level, color = LEVEL_COLOR[lvl];
+
+    $("verdictBanner").className = `verdict-banner status-${lvl}`;
+    $("verdictBadge").className = `verdict-badge badge-${lvl}`;
+    $("verdictBadge").textContent = d.verdict.label;
+    $("verdictTitle").textContent = d.ontology.primary_status;
+    $("verdictSubtitle").textContent = d.ontology.explanation;
+    const mock = (d.landmarks_source || "").startsWith("mock:");
+    $("mockWarning").hidden = !mock;
+    if (mock) $("mockWarning").textContent = `Warning: SYNTHETIC landmarks from the mock server (profile "${d.landmarks_source.slice(5)}"). ` +
+      "The FGS score does not come from the photo: the real Tech4Animals API is needed.";
+
+    const total = d.scores.total;
+    $("gaugeScoreNum").textContent = total;
+    $("gaugeProgress").style.strokeDashoffset = CIRCUMFERENCE - (total / 6) * CIRCUMFERENCE;
+    $("gaugeProgress").style.stroke = color;
+    $("scorePercentLabel").textContent = `Pain index: ${Math.round((total / 6) * 100)}%`;
+
+    const t = d.thermal;
+    $("tempValue").textContent = t.temperature.toFixed(1);
+    $("thermalStatus").textContent = t.thermal_status;
+    $("thermalDetail").textContent = `Surface ${t.surface_max_c} °C + offset ${t.body_offset_c} °C · scale ${t.scale.min}–${t.scale.max} °C`;
+    const pct = Math.min(100, Math.max(0, ((t.temperature - 36) / 6) * 100));
+    $("tempMarker").style.left = `${pct}%`; $("tempMarker").classList.remove("hidden");
+
+    [["ear", "Ratio"], ["eye", "EAR"], ["muzzle", "Ratio"]].forEach(([k, label]) => {
+      $(`${k}ScoreBadge`).textContent = d.scores[k];
+      $(`${k}ScoreBadge`).className = `au-badge-score score-${d.scores[k]}`;
+      $(`${k}Metric`).textContent = `${label}: ${d.ratios[`${k}_ratio`]}`;
+      $(`${k}Desc`).textContent = d.descriptions[k];
+    });
+
+    $("swrlRuleCode").textContent = d.ontology.fired_rules.map((r) => r.swrl).join("\n\n") || "No rule fired";
+    $("reasonerTime").textContent = `Reasoner: ${d.ontology.reasoner} · inferred statuses: ${d.ontology.inferred_status.join(", ")} · ${new Date().toLocaleTimeString()}`;
+
+    $("reportText").innerHTML = markdown(d.report.text);
+    $("reportEngine").textContent = d.report.engine === "summary"
+      ? `Automatic summary${d.report.error ? ` — ${d.report.error}` : " (Azure OpenAI not configured)"}`
+      : `Written by ${d.report.engine}`;
+
+    $("chatLog").innerHTML = "";
+    $("chatInput").disabled = $("chatBtn").disabled = false;
   }
 
-  // =========================================================================
-  // Render Diagnosis & Results
-  // =========================================================================
+  function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+  function markdown(s) { return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\n/g, "<br>"); }
 
-  function displayResults(data) {
-    // 1. Update landmarks & re-render canvas
-    if (data.landmarks) {
-      currentLandmarks = data.landmarks;
-      renderCanvas();
-    }
-
-    // 2. Verdict Banner (Answer to: È malato oppure no?)
-    const status = data.health_status.toLowerCase(); // 'good', 'medium', 'poor'
-    verdictBanner.className = `verdict-banner status-${status}`;
-
-    if (status === "good") {
-      verdictBadge.className = "verdict-badge badge-good";
-      verdictBadge.textContent = "🟢 NON MALATO (SANO)";
-      verdictTitle.textContent = "Gatto in Condizioni Ottimali";
-      verdictSubtitle.textContent = "Nessun indicatore clinico o morfologico di dolore o patologia facciale rilevato.";
-      verdictAdvice.textContent = "Raccomandazione: Il felino presenta tratti distesi e normali. Nessun intervento veterinario richiesto.";
-      verdictAdvice.style.color = "var(--status-good)";
-    } else if (status === "medium") {
-      verdictBadge.className = "verdict-badge badge-medium";
-      verdictBadge.textContent = "🟡 STATO DI ATTENZIONE";
-      verdictTitle.textContent = "Disagio Lieve o Tensione";
-      verdictSubtitle.textContent = "Rilevata alterazione moderata delle unità d'azione facciali. Possibile fastidio o dolore iniziale.";
-      verdictAdvice.textContent = "Raccomandazione: Monitorare il comportamento alimentare e l'interazione nelle successive 2-4 ore.";
-      verdictAdvice.style.color = "var(--status-medium)";
-    } else {
-      verdictBadge.className = "verdict-badge badge-poor";
-      verdictBadge.textContent = "🔴 MALATO (DOLORE ACUTO)";
-      verdictTitle.textContent = "Dolore Acuto Evidente";
-      verdictSubtitle.textContent = "Segni marcati di sofferenza facciale FGS. Orecchie ruotate, fessura orbitale serrata o muso teso.";
-      verdictAdvice.textContent = "Raccomandazione: Richiesta visita clinica veterinaria immediata e somministrazione di adeguata terapia analgesica.";
-      verdictAdvice.style.color = "var(--status-poor)";
-    }
-
-    // 3. Gauge Progress (0 to 6)
-    const totalScore = data.scores.total;
-    gaugeScoreNum.textContent = totalScore;
-    const percent = Math.round((totalScore / 6) * 100);
-    scorePercentLabel.textContent = `Indice di sofferenza: ${percent}%`;
-
-    const offset = CIRCLE_CIRCUMFERENCE - (totalScore / 6) * CIRCLE_CIRCUMFERENCE;
-    gaugeProgress.style.strokeDashoffset = offset;
-    gaugeProgress.style.stroke = status === "good" ? "var(--status-good)" : (status === "medium" ? "var(--status-medium)" : "var(--status-poor)");
-
-    // 4. Action Units Cards
-    updateAUCard(earScoreBadge, earMetric, earDesc, data.scores.ear, `Ratio: ${data.ratios.ear_ratio}`, data.descriptions.ear);
-    updateAUCard(eyeScoreBadge, eyeMetric, eyeDesc, data.scores.eye, `EAR: ${data.ratios.eye_ratio}`, data.descriptions.eye);
-    updateAUCard(muzzleScoreBadge, muzzleMetric, muzzleDesc, data.scores.muzzle, `Ratio: ${data.ratios.muzzle_ratio}`, data.descriptions.muzzle);
-
-    // 5. Semantic Reasoner & SWRL Trace
-    swrlRuleCode.textContent = data.swrl_rule;
-    reasonerTime.textContent = `Timestamp: ${new Date().toLocaleTimeString()} • Reasoner: Pellet / OWL DL • Subject: ${data.cat_name}`;
+  // ---------------------------------------------------------------------------
+  // Chat about the report
+  // ---------------------------------------------------------------------------
+  function addMessage(role, text) {
+    const div = document.createElement("div");
+    div.className = `chat-msg ${role}`;
+    div.innerHTML = markdown(text);
+    $("chatLog").appendChild(div);
+    $("chatLog").scrollTop = $("chatLog").scrollHeight;
   }
 
-  function updateAUCard(badgeElem, metricElem, descElem, score, metricText, descText) {
-    badgeElem.textContent = score;
-    badgeElem.className = `au-badge-score score-${score}`;
-    metricElem.textContent = metricText;
-    descElem.textContent = descText;
-  }
+  $("chatForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const question = $("chatInput").value.trim();
+    if (!question || !state.result) return;
+    $("chatInput").value = "";
+    addMessage("user", question);
+    $("chatBtn").disabled = true;
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, context: state.result, history: state.chat }),
+      });
+      const data = await res.json();
+      const answer = res.ok ? data.answer : `Error: ${data.error}`;
+      addMessage("assistant", answer);
+      state.chat.push({ role: "user", content: question }, { role: "assistant", content: answer });
+    } catch (err) {
+      addMessage("assistant", `Error: ${err.message}`);
+    } finally {
+      $("chatBtn").disabled = false;
+    }
+  });
 });

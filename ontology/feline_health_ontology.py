@@ -1,216 +1,180 @@
 """
 =============================================================================
-Ontologia Biomedica Feline Grimace Scale (FGS) per Explainable AI (XAI)
-Libreria: Owlready2 con Reasoner Pellet (supporto SWRL)
-IRI Ontologia: http://test.org/feline_health.owl
+Biomedical Feline Grimace Scale (FGS) ontology + thermal extension, for Explainable AI
+Library: Owlready2 with the Pellet reasoner (SWRL support)
+Ontology IRI: http://test.org/feline_health.owl
 =============================================================================
-Requisiti di sistema:
-  - pip install owlready2
-  - Java Runtime Environment (JRE) installato e disponibile nel PATH (per Pellet)
+Requirements: pip install owlready2  +  Java (JRE) on PATH for Pellet.
+The SWRL rules are in ontology/rules.py.
 =============================================================================
 """
 
-from owlready2 import (
-    get_ontology,
-    Thing,
-    ObjectProperty,
-    DataProperty,
-    Imp,
-    sync_reasoner_pellet
-)
+import logging
+import re
+import threading
+import uuid
+from typing import Optional
 
-# 1. Creazione e inizializzazione dell'ontologia
+from owlready2 import (DataProperty, Imp, ObjectProperty, Thing, destroy_entity, get_ontology,
+                       sync_reasoner_pellet)
+
+from .rules import RULES, SEVERITY
+
+log = logging.getLogger(__name__)
 onto = get_ontology("http://test.org/feline_health.owl")
 
 with onto:
     # -------------------------------------------------------------------------
-    # 2. Definizione delle Classi Principali
+    # Classes
     # -------------------------------------------------------------------------
-    
-    # Soggetto principale dell'analisi clinica
     class Cat(Thing):
-        """Rappresenta il paziente felino analizzato."""
-        pass
+        """The feline patient being analysed."""
 
-    # Classe base per le unità di azione facciale (Facial Features FGS)
     class FacialFeature(Thing):
-        """Classe astratta/base per le caratteristiche morfologiche facciali."""
-        pass
+        """Base class for the FGS facial action units."""
 
-    # Sottoclassi specifiche per i landmark e action units della FGS
     class EarPosition(FacialFeature):
-        """Posizione delle orecchie (dritte, leggermente appiattite o ruotate/abbassate)."""
-        pass
+        """Ear position (upright, slightly flattened or rotated/lowered)."""
 
     class OrbitalTightening(FacialFeature):
-        """Chiusura/tensione orbitale (occhi aperti, semi-chiusi o serrati)."""
-        pass
+        """Orbital tightening (eyes open, half-closed or squeezed)."""
 
     class MuzzleTension(FacialFeature):
-        """Tensione del muso e posizione dei baffi (rilassato, moderatamente teso o ellittico/teso)."""
-        pass
+        """Muzzle tension (relaxed, moderately tense or elliptical/tense)."""
 
-    # Punteggio assegnato a ciascuna Action Unit (0, 1, 2)
     class ActionUnitScore(Thing):
-        """Livello di intensità osservato per una singola unità d'azione facciale."""
-        pass
+        """Observed intensity of a single action unit (0, 1, 2)."""
 
-    # Stato clinico di salute / livello di dolore inferito
     class HealthStatus(Thing):
-        """Classificazione semantica del livello di dolore/benessere del felino."""
-        pass
+        """Inferred health status / pain level."""
+
+    class ThermalStatus(Thing):
+        """Thermal status produced by the thermal module (vision/thermal_extractor.py)."""
 
     # -------------------------------------------------------------------------
-    # 3. Definizione delle Proprietà (Object & Data Properties)
+    # Properties
     # -------------------------------------------------------------------------
-
-    # Relazione tra il gatto e le sue caratteristiche facciali
     class hasFeature(ObjectProperty):
         domain = [Cat]
         range = [FacialFeature]
 
-    # Assegnazione del punteggio qualitativo alla singola feature
     class hasScore(ObjectProperty):
         domain = [FacialFeature]
         range = [ActionUnitScore]
 
-    # Stato di salute complessivo assegnato o inferito al gatto
     class hasHealthStatus(ObjectProperty):
         domain = [Cat]
         range = [HealthStatus]
 
-    # Punteggio FGS totale numerico calcolato
     class hasTotalScore(DataProperty):
+        """Total FGS score (0-6)."""
         domain = [Cat]
         range = [int]
 
-    # -------------------------------------------------------------------------
-    # 4. Individui Predefiniti (Istanze)
-    # -------------------------------------------------------------------------
+    class hasTemperature(DataProperty):
+        """Body temperature estimated from the thermal photo (°C)."""
+        domain = [Cat]
+        range = [float]
 
-    # Individui per ActionUnitScore
-    Score_0 = ActionUnitScore("Score_0", comment=["Assente - Landmark nei limiti di normalità (valore 0)"])
-    Score_1 = ActionUnitScore("Score_1", comment=["Moderato - Modifica parziale del landmark (valore 1)"])
-    Score_2 = ActionUnitScore("Score_2", comment=["Marcato - Chiaro segno di alterazione morfologica (valore 2)"])
-
-    # Individui per HealthStatus
-    Good = HealthStatus("Good", comment=["Assenza di dolore (FGS totale <= 1)"])
-    Medium = HealthStatus("Medium", comment=["Stato di attenzione / Dolore lieve-moderato (FGS totale 2-3)"])
-    Poor = HealthStatus("Poor", comment=["Dolore acuto / Necessità di analgesia (FGS totale >= 4)"])
+    class hasThermalStatus(ObjectProperty):
+        domain = [Cat]
+        range = [ThermalStatus]
 
     # -------------------------------------------------------------------------
-    # 5. Regole di Inferenza SWRL (Semantic Web Rule Language)
+    # Individuals
     # -------------------------------------------------------------------------
+    Score_0 = ActionUnitScore("Score_0", comment=["Absent - Landmark within normal limits (value 0)"])
+    Score_1 = ActionUnitScore("Score_1", comment=["Moderate - Partial change of the landmark (value 1)"])
+    Score_2 = ActionUnitScore("Score_2", comment=["Marked - Clear sign of morphological change (value 2)"])
 
-    # Regola 1: Totale <= 1 -> Stato 'Good'
-    rule_good = Imp()
-    rule_good.set_as_rule(
-        """Cat(?c) ^ hasTotalScore(?c, ?s) ^ lessThanOrEqual(?s, 1) -> hasHealthStatus(?c, Good)"""
-    )
+    Good = HealthStatus("Good", comment=["No pain (total FGS <= 1)"])
+    Medium = HealthStatus("Medium", comment=["Needs attention / Mild-to-moderate pain (total FGS 2-3)"])
+    Poor = HealthStatus("Poor", comment=["Acute pain / Analgesia needed (total FGS >= 4)"])
+    AcuteInflammatoryPain = HealthStatus("AcuteInflammatoryPain", comment=[
+        "Acute pain with fever (FGS >= 4 and temperature >= 39.5 °C): active inflammatory process"])
 
-    # Regola 2: Totale >= 2 e <= 3 -> Stato 'Medium'
-    rule_medium = Imp()
-    rule_medium.set_as_rule(
-        """Cat(?c) ^ hasTotalScore(?c, ?s) ^ greaterThanOrEqual(?s, 2) ^ lessThanOrEqual(?s, 3) -> hasHealthStatus(?c, Medium)"""
-    )
+    Hypothermia = ThermalStatus("Hypothermia", comment=["Temperature < 38.0 °C"])
+    Normothermia = ThermalStatus("Normothermia", comment=["Temperature 38.0 - 39.2 °C"])
+    MildFever = ThermalStatus("MildFever", comment=["Mild fever 39.3 - 39.9 °C"])
+    HighFever = ThermalStatus("HighFever", comment=["High fever >= 40.0 °C"])
 
-    # Regola 3: Totale >= 4 -> Stato 'Poor'
-    rule_poor = Imp()
-    rule_poor.set_as_rule(
-        """Cat(?c) ^ hasTotalScore(?c, ?s) ^ greaterThanOrEqual(?s, 4) -> hasHealthStatus(?c, Poor)"""
-    )
+    # -------------------------------------------------------------------------
+    # SWRL rules (text in ontology/rules.py)
+    # -------------------------------------------------------------------------
+    for _rule in RULES:
+        Imp(name=f"rule_{_rule.name}").set_as_rule(_rule.swrl)
+
+SCORES = {0: Score_0, 1: Score_1, 2: Score_2}
+FEATURES = {"ear": EarPosition, "eye": OrbitalTightening, "muzzle": MuzzleTension}
+_lock = threading.Lock()  # the Owlready world is global: one inference at a time
 
 
-# -----------------------------------------------------------------------------
-# 6. Funzione di Valutazione e Inferenza Semantica
-# -----------------------------------------------------------------------------
-def evaluate_cat_health(cat_name: str, ear_score_val: int, eye_score_val: int, muzzle_score_val: int, run_reasoner: bool = True):
+def _rules_for(statuses: list[str], total: int, temperature: Optional[float]) -> list[dict]:
+    return [{"name": r.name, "status": r.status, "swrl": r.swrl}
+            for r in RULES if r.status in statuses and r.holds(total, temperature)]
+
+
+def evaluate_cat_health(cat_name: str, ear_score_val: int, eye_score_val: int, muzzle_score_val: int,
+                        temperature: Optional[float] = None, thermal_status: Optional[str] = None,
+                        run_reasoner: bool = True) -> dict:
     """
-    Istanzia un paziente felino, popola le sue caratteristiche e invoca il reasoner
-    Pellet per dedurre lo stato di salute basato sulle regole SWRL.
+    Instantiates the cat with its action units (and, if available, the temperature), runs Pellet
+    to apply the SWRL rules and returns the inferred health status with the fired rules.
+    The individuals created are removed at the end, so analyses do not affect each other.
 
-    :param cat_name: Nome identificativo dell'individuo gatto
-    :param ear_score_val: Punteggio per EarPosition (0, 1 o 2)
-    :param eye_score_val: Punteggio per OrbitalTightening (0, 1 o 2)
-    :param muzzle_score_val: Punteggio per MuzzleTension (0, 1 o 2)
-    :param run_reasoner: Se True, invoca sync_reasoner_pellet()
-    :return: Un dizionario esplicativo con l'istanza del gatto e i risultati diagnostici
+    :return: {cat_name, scores, temperature, thermal_status, inferred_status (least to most severe),
+              primary_status, explanation, fired_rules [{name, status, swrl}], reasoner}
     """
-    score_mapping = {
-        0: onto.Score_0,
-        1: onto.Score_1,
-        2: onto.Score_2
-    }
+    values = {"ear": ear_score_val, "eye": eye_score_val, "muzzle": muzzle_score_val}
+    for label, val in values.items():
+        if val not in SCORES:
+            raise ValueError(f"Invalid value for {label}: {val}. Allowed FGS values are 0, 1 or 2.")
+    total = sum(values.values())
+    if thermal_status is not None and onto[thermal_status] is None:
+        raise ValueError(f"Unknown thermal status: {thermal_status}")
 
-    # Validazione dei parametri di input
-    for label, val in [("EarPosition", ear_score_val), ("OrbitalTightening", eye_score_val), ("MuzzleTension", muzzle_score_val)]:
-        if val not in score_mapping:
-            raise ValueError(f"Valore non valido per {label}: {val}. I valori ammessi per la FGS sono 0, 1 o 2.")
+    with _lock:
+        base = re.sub(r"\W+", "_", cat_name).strip("_") or "Cat"
+        uid = uuid.uuid4().hex[:8]
+        with onto:
+            cat = Cat(f"{base}_{uid}")
+            features = []
+            for key, cls in FEATURES.items():
+                feature = cls(f"{base}_{uid}_{cls.__name__}")
+                feature.hasScore = [SCORES[values[key]]]
+                features.append(feature)
+            cat.hasFeature = features
+            cat.hasTotalScore = [total]
+            if temperature is not None:
+                cat.hasTemperature = [float(temperature)]
+            if thermal_status is not None:
+                cat.hasThermalStatus = [onto[thermal_status]]
 
-    with onto:
-        # A. Istanziazione o recupero del gatto
-        cat = onto.Cat(cat_name)
+        reasoner = "python-fallback"
+        statuses: list[str] = []
+        if run_reasoner:
+            try:
+                sync_reasoner_pellet(infer_property_values=True, infer_data_property_values=True, debug=0)
+                statuses = [s.name for s in cat.hasHealthStatus]
+                reasoner = "pellet"
+            except Exception as e:  # Java/Pellet not available: same rules, evaluated in Python
+                log.warning("Pellet not available (%s): using the Python fallback of the same rules.", e)
+        if reasoner == "python-fallback":
+            statuses = [r.status for r in RULES if r.holds(total, temperature)]
 
-        # B. Istanziazione delle 3 Action Units facciali per il soggetto
-        ear_feature = onto.EarPosition(f"{cat_name}_EarPosition")
-        eye_feature = onto.OrbitalTightening(f"{cat_name}_OrbitalTightening")
-        muzzle_feature = onto.MuzzleTension(f"{cat_name}_MuzzleTension")
+        for entity in [cat, *features]:
+            destroy_entity(entity)
 
-        # C. Assegnazione del punteggio (hasScore) a ciascuna feature
-        ear_feature.hasScore = [score_mapping[ear_score_val]]
-        eye_feature.hasScore = [score_mapping[eye_score_val]]
-        muzzle_feature.hasScore = [score_mapping[muzzle_score_val]]
-
-        # D. Collegamento delle feature al soggetto felino (hasFeature)
-        cat.hasFeature = [ear_feature, eye_feature, muzzle_feature]
-
-        # E. Calcolo del punteggio totale FGS e assegnazione a hasTotalScore
-        total_score = ear_score_val + eye_score_val + muzzle_score_val
-        cat.hasTotalScore = [total_score]
-
-    print(f"\n=======================================================")
-    print(f" Analisi Clinica FGS: Paziente '{cat_name}'")
-    print(f"=======================================================")
-    print(f" - Posizione Orecchie (EarPosition):        {ear_score_val} ({score_mapping[ear_score_val].name})")
-    print(f" - Tensione Orbitale (OrbitalTightening):  {eye_score_val} ({score_mapping[eye_score_val].name})")
-    print(f" - Tensione Muso (MuzzleTension):          {muzzle_score_val} ({score_mapping[muzzle_score_val].name})")
-    print(f" - Punteggio Totale FGS:                   {total_score}/6")
-
-    inferred_status_names = []
-    clinical_explanation = ""
-
-    if run_reasoner:
-        try:
-            print(" -> Avvio del reasoner Pellet per l'applicazione delle regole SWRL...")
-            sync_reasoner_pellet(infer_property_values=True, infer_data_property_values=True)
-            inferred_status_names = [status.name for status in cat.hasHealthStatus]
-            print(f" -> Stato di Salute INFERITO: {inferred_status_names}")
-            for status in cat.hasHealthStatus:
-                if status.comment:
-                    clinical_explanation = status.comment[0]
-                    print(f"    Spiegazione: {clinical_explanation}")
-        except Exception as e:
-            print(f" [!] Avviso Reasoner: Impossibile eseguire Pellet ({e}).")
-            # Fallback euristico se Pellet / Java non è disponibile nell'ambiente locale
-            if total_score <= 1:
-                cat.hasHealthStatus = [onto.Good]
-            elif total_score <= 3:
-                cat.hasHealthStatus = [onto.Medium]
-            else:
-                cat.hasHealthStatus = [onto.Poor]
-            inferred_status_names = [status.name for status in cat.hasHealthStatus]
-            clinical_explanation = cat.hasHealthStatus[0].comment[0]
-            print(f" -> Stato applicato da logica di fallback: {inferred_status_names}")
-
+    statuses = sorted(set(statuses), key=SEVERITY.index)
+    primary = statuses[-1] if statuses else "Good"
     return {
-        "cat_instance": cat,
         "cat_name": cat_name,
-        "scores": {
-            "ear": ear_score_val,
-            "eye": eye_score_val,
-            "muzzle": muzzle_score_val,
-            "total": total_score
-        },
-        "inferred_status": inferred_status_names,
-        "explanation": clinical_explanation
+        "scores": {**values, "total": total},
+        "temperature": temperature,
+        "thermal_status": thermal_status,
+        "inferred_status": statuses,
+        "primary_status": primary,
+        "explanation": onto[primary].comment[0],
+        "fired_rules": _rules_for(statuses, total, temperature),
+        "reasoner": reasoner,
     }

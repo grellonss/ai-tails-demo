@@ -1,162 +1,142 @@
 """
 =============================================================================
-AI-Tails: FGS Clinical Web Application & Reasoning Server
+AI-Tails: multimodal neuro-symbolic platform (MVP)
 =============================================================================
-Unisce:
-  1. Frontend Web SPA per caricamento immagini e visualizzazione landmark
-  2. Modulo di Visione Artificiale e Calcolo Geometrico FGS
-  3. Ontologia Biomedica OWL2 con Inferenza SWRL (Pellet / Owlready2)
+/api/analyze pipeline:
+  1. RGB photo     -> YOLO (cat face) -> t4a API (48 landmarks) -> FGS scores (ears, eyes, muzzle)
+  2. Thermal photo -> vision/thermal_extractor.py -> estimated temperature + thermal status
+  3. OWL2 ontology + SWRL rules (Pellet) -> health status + fired rules
+  4. Azure OpenAI -> integrated report
+Run: python app.py  (see README for configuration)
 =============================================================================
 """
 
+import logging
 import os
-import sys
-import tempfile
-from flask import Flask, render_template, request, jsonify
-from PIL import Image
 
-# Configurazione path del progetto
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(PROJECT_ROOT)
+import cv2
+import numpy as np
+from flask import Flask, jsonify, render_template, request
 
-from vision import (
-    extract_fgs_scores_from_landmarks,
-    analyze_landmarks_detailed,
-    generate_landmarks_for_image,
-    generate_mock_landmarks,
-    send_image_for_processing,
-    DEFAULT_LANDMARK_MAP
-)
-from ontology import evaluate_cat_health, onto
+import config
+from agent import AgentError, chat, generate_multimodal_explanation
+from ontology import RULES, evaluate_cat_health, onto
+from vision import (FaceModelMissing, LandmarksApiError, ThermalImageError, analyze_landmarks_detailed,
+                    analyze_thermal_image, detect_cat_face, send_image_for_processing)
 
-# Inizializzazione Flask App
-app = Flask(__name__, 
-            template_folder=os.path.join(PROJECT_ROOT, "templates"),
-            static_folder=os.path.join(PROJECT_ROOT, "static"))
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB max upload
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+app = Flask(__name__, template_folder=str(config.PROJECT_ROOT / "templates"),
+            static_folder=str(config.PROJECT_ROOT / "static"))
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB per request
+
+# How each ontology health status is shown to the user
+VERDICTS = {
+    "Good": {"level": "good", "is_sick": False, "label": "NOT SICK (HEALTHY)"},
+    "Medium": {"level": "medium", "is_sick": False, "label": "NEEDS ATTENTION"},
+    "Poor": {"level": "poor", "is_sick": True, "label": "SICK (ACUTE PAIN)"},
+    "AcuteInflammatoryPain": {"level": "poor", "is_sick": True, "label": "SICK (PAIN + FEVER)"},
+}
+
+
+def _error(message: str, status: int, step: str):
+    return jsonify({"error": message, "step": step}), status
+
+
+def _decode(file_storage):
+    data = file_storage.read()
+    return data, cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
 
 
 @app.route("/")
 def index():
-    """Restituisce l'interfaccia web diagnostica."""
     return render_template("index.html")
 
 
 @app.route("/api/health", methods=["GET"])
 def health_check():
-    """Verifica lo stato del server e dell'ontologia."""
+    """Component status: useful to check the configuration before the demo."""
     return jsonify({
         "status": "online",
         "ontology": str(onto.base_iri),
-        "classes_count": len(list(onto.classes())),
-        "rules_active": True
+        "rules": [r.name for r in RULES],
+        "yolo_weights": config.YOLO_WEIGHTS.exists(),
+        "landmarks_api": bool(config.LANDMARKS_API_URL),
+        "azure_openai": config.azure_configured(),
     })
 
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     """
-    Endpoint per l'analisi clinica del gatto a partire dall'immagine caricata.
-    Riceve l'immagine, estrae/stima i landmark facciali, calcola le proporzioni FGS
-    e invoca il reasoner ontologico.
+    Multipart form: image (RGB face photo), thermal_image (thermal photo), cat_name (optional).
+    Returns FGS, thermal, ontology outcome and report; on error {"error", "step"}.
     """
-    cat_name = request.form.get("cat_name", "Oliver_Paziente").strip()
-    if not cat_name:
-        cat_name = "Oliver_Paziente"
-        
-    profile_preset = request.form.get("profile_preset", "auto")
-    custom_api_url = request.form.get("api_url", "").strip()
-    
+    cat_name = (request.form.get("cat_name") or "").strip() or "Patient"
+    rgb_file, thermal_file = request.files.get("image"), request.files.get("thermal_image")
+    if not rgb_file or not thermal_file:
+        return _error("Both photos are required: 'image' (RGB) and 'thermal_image' (thermal).", 400, "input")
+
+    # 1. Face: YOLO -> landmarks -> FGS
+    rgb_bytes, rgb = _decode(rgb_file)
+    if rgb is None:
+        return _error("The RGB photo could not be read.", 400, "input")
     try:
-        img_width = float(request.form.get("image_width", 600))
-        img_height = float(request.form.get("image_height", 600))
-    except (ValueError, TypeError):
-        img_width, img_height = 600.0, 600.0
+        face = detect_cat_face(rgb)
+    except FaceModelMissing as e:
+        return _error(str(e), 500, "face")
+    if face is None:
+        return _error("No cat face found in the photo: a close-up, frontal photo is needed.", 422, "face")
+    meta = {"source": "api"}
+    try:
+        landmarks = send_image_for_processing(rgb_bytes, config.LANDMARKS_API_URL,
+                                              name=rgb_file.filename or "image.jpg", face_box=face["box"], meta=meta)
+    except LandmarksApiError as e:
+        return _error(str(e), 502, "landmarks")
+    fgs = analyze_landmarks_detailed(landmarks)
 
-    landmarks = None
-    uploaded_file = request.files.get("image")
+    # 2. Thermal photo -> temperature
+    _, thermal_img = _decode(thermal_file)
+    try:
+        thermal = analyze_thermal_image(thermal_img)
+    except ThermalImageError as e:
+        return _error(str(e), 422, "thermal")
 
-    # 1. Se è specificato un file e un endpoint API remoto reale, invia la foto
-    if uploaded_file and custom_api_url:
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                uploaded_file.save(tmp.name)
-                tmp_path = tmp.name
+    # 3. Ontology: the status and the fired rules come from the reasoner, not from this file
+    ontology = evaluate_cat_health(cat_name, fgs["scores"]["ear"], fgs["scores"]["eye"], fgs["scores"]["muzzle"],
+                                   temperature=thermal["temperature"], thermal_status=thermal["thermal_status"])
 
-            # Invia foto all'API remota t4a
-            landmarks = send_image_for_processing(tmp_path, api_url=custom_api_url)
-            os.remove(tmp_path)
-        except Exception as e:
-            print(f"[!] Errore chiamata API esterna ({e}), passaggio a stima geometrica locale...")
-            landmarks = None
+    # 4. Report
+    report = generate_multimodal_explanation(cat_name, fgs["scores"], thermal, ontology)
 
-    # 2. Se non abbiamo landmark dall'API esterna, genera landmark geometrici adattati all'immagine
-    if not landmarks:
-        # Se preset non è esplicitamente selezionato, analizza l'aspetto dell'immagine
-        if profile_preset in ["healthy", "moderate", "pain"]:
-            selected_profile = profile_preset
-        else:
-            # Rilevamento automatico: profilo di default sano o basato su parametri
-            selected_profile = "healthy"
-
-        landmarks = generate_landmarks_for_image(width=img_width, height=img_height, profile=selected_profile)
-
-    # 3. Ponte Geometrico (Feature Engineering FGS)
-    analysis_details = analyze_landmarks_detailed(landmarks, DEFAULT_LANDMARK_MAP)
-    scores = analysis_details["scores"]
-    ratios = analysis_details["ratios"]
-    descriptions = analysis_details["descriptions"]
-
-    # 4. Invocazione dell'Ontologia Semantica OWL con Reasoner Pellet
-    ontology_result = evaluate_cat_health(
-        cat_name=cat_name,
-        ear_score_val=scores["ear"],
-        eye_score_val=scores["eye"],
-        muzzle_score_val=scores["muzzle"],
-        run_reasoner=True
-    )
-
-    inferred_statuses = ontology_result.get("inferred_status", [])
-    primary_status = inferred_statuses[0] if inferred_statuses else "Good"
-
-    # Determinazione dell'esito diagnostico primario (È malato oppure no?)
-    total_score = scores["total"]
-    if total_score <= 1:
-        is_sick = False
-        verdict_category = "NON MALATO (SANO)"
-        swrl_rule_str = "Cat(?c) ^ hasTotalScore(?c, ?s) ^ lessThanOrEqual(?s, 1) -> hasHealthStatus(?c, Good)"
-    elif total_score <= 3:
-        is_sick = False  # In stato di monitoraggio, non necessariamente patologico acuto
-        verdict_category = "STATO DI ATTENZIONE (DISAGIO MODERATO)"
-        swrl_rule_str = "Cat(?c) ^ hasTotalScore(?c, ?s) ^ greaterThanOrEqual(?s, 2) ^ lessThanOrEqual(?s, 3) -> hasHealthStatus(?c, Medium)"
-    else:
-        is_sick = True   # Patologia acuta / Dolore marcato
-        verdict_category = "MALATO (DOLORE ACUTO)"
-        swrl_rule_str = "Cat(?c) ^ hasTotalScore(?c, ?s) ^ greaterThanOrEqual(?s, 4) -> hasHealthStatus(?c, Poor)"
-
-    response_payload = {
+    return jsonify({
         "cat_name": cat_name,
-        "is_sick": is_sick,
-        "verdict_category": verdict_category,
-        "health_status": primary_status,
-        "scores": scores,
-        "ratios": ratios,
-        "descriptions": descriptions,
-        "explanation": ontology_result.get("explanation", ""),
-        "swrl_rule": swrl_rule_str,
-        "landmarks": landmarks
-    }
-
-    return jsonify(response_payload)
+        "verdict": VERDICTS[ontology["primary_status"]],
+        "face": face,
+        "landmarks": landmarks,
+        "landmarks_source": meta["source"],
+        "scores": fgs["scores"], "ratios": fgs["ratios"], "descriptions": fgs["descriptions"],
+        "thermal": thermal,
+        "ontology": ontology,
+        "report": report,
+    })
 
 
-# =============================================================================
-# Avvio del Server Web
-# =============================================================================
+@app.route("/api/chat", methods=["POST"])
+def chat_endpoint():
+    """JSON {question, context (/api/analyze response), history [{role, content}]} -> {answer, engine}."""
+    body = request.get_json(silent=True) or {}
+    question = (body.get("question") or "").strip()
+    if not question:
+        return _error("Empty question.", 400, "chat")
+    context = body.get("context") or {}
+    context = {k: context.get(k) for k in ("cat_name", "verdict", "scores", "thermal", "ontology", "report")}
+    try:
+        return jsonify(chat(question, context, body.get("history")))
+    except AgentError as e:
+        return _error(str(e), 502, "chat")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print("\n" + "=" * 65)
-    print(f" AI-TAILS: FGS Clinical Analyzer Web Server")
-    print(f" Web App attiva all'indirizzo: http://127.0.0.1:{port}")
-    print("=" * 65 + "\n")
-    app.run(host="127.0.0.1", port=port, debug=False)
+    print(f"\n AI-Tails listening on http://127.0.0.1:{port}\n")
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

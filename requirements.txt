@@ -1,4 +1,10 @@
-flask>=3.0.0
-owlready2>=0.45
-requests>=2.31.0
-pillow>=10.0.0
+flask>=3.0
+owlready2==0.47        # 0.51 ships a Pellet/Jena built for Java 25: with Java 21 use 0.47
+requests>=2.31
+pillow>=10.0
+numpy>=1.26
+opencv-python>=4.8,<5  # also used by ultralytics
+ultralytics>=8.3       # YOLOv8 for cat face detection
+openai>=1.40           # Azure OpenAI client
+python-dotenv>=1.0
+pytest>=8.0
