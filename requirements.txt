@@ -1,0 +1,4 @@
+flask>=3.0.0
+owlready2>=0.45
+requests>=2.31.0
+pillow>=10.0.0

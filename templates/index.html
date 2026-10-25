@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-Tails: Feline Grimace Scale (FGS) Clinical Analyzer</title>
+  <meta name="description" content="Interfaccia clinica per la diagnosi del dolore e salute felina tramite visione artificiale e ontologia semantica biomedica FGS.">
+  
+  <!-- Modern Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- CSS Stylesheet -->
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <!-- App Header -->
+  <header class="app-header">
+    <div class="header-container">
+      <div class="brand-wrapper">
+        <div class="logo-badge" aria-hidden="true">🐾</div>
+        <div class="brand-text">
+          <h1>AI-Tails • FGS Clinical Analyzer</h1>
+          <p>Diagnosi Semantica del Dolore Felino (Explainable AI & Ontologia Biomedica)</p>
+        </div>
+      </div>
+      <div class="system-status-pills">
+        <span class="status-pill">
+          <span class="pulse-dot"></span>
+          Ontologia OWL2: Connessa
+        </span>
+        <span class="status-pill">
+          <span class="pulse-dot" style="background:#06b6d4; box-shadow:0 0 8px #06b6d4;"></span>
+          Pellet SWRL Reasoner: Attivo
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Dashboard -->
+  <main class="main-wrapper">
+    <div class="grid-dashboard">
+
+      <!-- LEFT COLUMN: Image Input & Vision Mesh Canvas -->
+      <section class="glass-panel" aria-labelledby="inputPanelTitle">
+        <div class="panel-header">
+          <h2 id="inputPanelTitle" class="panel-title">
+            <span>📷</span> Acquisizione & Analisi Facciale
+          </h2>
+          <span class="panel-tag">Visione Artificiale</span>
+        </div>
+
+        <!-- Drag & Drop Upload Zone -->
+        <div id="uploadDropzone" class="upload-dropzone" tabindex="0" role="button" aria-label="Carica foto del gatto">
+          <input type="file" id="fileInput" class="file-input-hidden" accept="image/jpeg, image/png, image/webp">
+          <div class="upload-icon">📤</div>
+          <h3 class="upload-title">Trascina o Incolla la Foto del Gatto</h3>
+          <p class="upload-subtitle">Supporta JPG, PNG, WEBP oppure incolla dagli appunti (Ctrl+V)</p>
+        </div>
+
+        <!-- Interactive Canvas Viewport -->
+        <div class="canvas-container">
+          <canvas id="catCanvas"></canvas>
+          <div id="canvasEmptyState" class="canvas-empty-state">
+            <p>Nessuna immagine caricata.</p>
+            <p style="font-size: 0.8rem; margin-top: 0.4rem; color: var(--text-muted);">
+              Carica una foto ravvicinata del muso per visualizzare i 48 landmark FGS.
+            </p>
+          </div>
+        </div>
+
+        <!-- Canvas Controls Toolbar -->
+        <div class="canvas-toolbar">
+          <label class="toggle-label" for="toggleLandmarks">
+            <span class="toggle-switch">
+              <input type="checkbox" id="toggleLandmarks" checked>
+              <span class="slider-round"></span>
+            </span>
+            <span>Mesh 48 Landmark</span>
+          </label>
+
+          <label class="toggle-label" for="toggleLines">
+            <span class="toggle-switch">
+              <input type="checkbox" id="toggleLines" checked>
+              <span class="slider-round"></span>
+            </span>
+            <span>Linee Geometriche FGS</span>
+          </label>
+        </div>
+
+        <!-- Patient Info & Options -->
+        <div class="form-group-inline">
+          <div>
+            <label class="input-label" for="catNameInput">Nome / ID Paziente</label>
+            <input type="text" id="catNameInput" class="text-input" placeholder="Es. Oliver" value="Oliver">
+          </div>
+          <div>
+            <label class="input-label" for="profilePreset">Modalità Rilevamento Landmark</label>
+            <select id="profilePreset" class="select-input">
+              <option value="auto" selected>✨ Rilevamento Automatico</option>
+              <option value="healthy">Test: Profilo Sano (Score 0-1)</option>
+              <option value="moderate">Test: Profilo Moderato (Score 2-3)</option>
+              <option value="pain">Test: Profilo Dolore Acuto (Score 4-6)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Collapsible Advanced API Settings -->
+        <details class="settings-details">
+          <summary class="settings-summary">⚙️ Configurazione Endpoint API t4a (Opzionale)</summary>
+          <div class="settings-content">
+            <label class="input-label" for="apiUrlInput">URL API t4a Animal Facial Landmarks</label>
+            <input type="url" id="apiUrlInput" class="text-input" placeholder="http://localhost:8000/api/landmarks">
+            <p style="font-size:0.75rem; color:var(--text-muted); margin-top:0.4rem;">
+              Se non specificato, il sistema utilizza l'algoritmo geometrico interno calibrato sulle proporzioni craniche.
+            </p>
+          </div>
+        </details>
+
+        <!-- Analyze CTA Button -->
+        <button id="analyzeBtn" class="btn-primary" disabled>
+          <span id="btnSpinner" class="spinner hidden"></span>
+          <span id="btnText">Analizza Stato di Salute</span>
+        </button>
+      </section>
+
+      <!-- RIGHT COLUMN: Clinical Verdict ("È Malato oppure No?") & Explainable AI -->
+      <section class="glass-panel" aria-labelledby="diagnosisPanelTitle">
+        <div class="panel-header">
+          <h2 id="diagnosisPanelTitle" class="panel-title">
+            <span>🩺</span> Esito Diagnostico & Spiegazione XAI
+          </h2>
+          <span class="panel-tag">Ragionamento SWRL</span>
+        </div>
+
+        <!-- Primary Health Verdict Banner (Answer to: È malato oppure no?) -->
+        <div id="verdictBanner" class="verdict-banner status-good">
+          <div class="verdict-top">
+            <span class="verdict-question">Esito Clinico</span>
+            <span id="verdictBadge" class="verdict-badge badge-good">In attesa di analisi</span>
+          </div>
+          <h3 id="verdictTitle" class="verdict-title">Carica una Foto del Gatto</h3>
+          <p id="verdictSubtitle" class="verdict-subtitle">
+            L'ontologia biomedica valuterà l'integrità morfologica facciale tramite regole SWRL.
+          </p>
+          <div id="verdictAdvice" class="verdict-advice-box">
+            In attesa dei dati biometrici...
+          </div>
+        </div>
+
+        <!-- Score Gauge & Summary Stats -->
+        <div class="score-summary-grid">
+          <div class="gauge-wrapper">
+            <svg class="gauge-svg" viewBox="0 0 100 100">
+              <circle class="gauge-bg" cx="50" cy="50" r="40"></circle>
+              <circle id="gaugeProgress" class="gauge-progress" cx="50" cy="50" r="40"></circle>
+            </svg>
+            <div class="gauge-center-text">
+              <span id="gaugeScoreNum" class="gauge-score-num">0</span>
+              <span class="gauge-score-denom">/ 6 FGS</span>
+            </div>
+          </div>
+          <div class="score-meta">
+            <h4>Punteggio Totale Feline Grimace Scale</h4>
+            <p id="scorePercentLabel">Indice di sofferenza: 0%</p>
+            <p style="margin-top: 0.35rem; font-size: 0.78rem; color: var(--text-muted);">
+              Soglia clinica d'intervento veterinario: &ge; 4 / 6
+            </p>
+          </div>
+        </div>
+
+        <!-- Action Units Breakdown (Explainable AI) -->
+        <div class="action-units-section">
+          <h4 class="section-label">Scomposizione Trasparente delle 3 Unità d'Azione (AU)</h4>
+          <div class="au-cards-container">
+
+            <!-- Ear Position -->
+            <div class="au-card">
+              <div class="au-info">
+                <h5><span>👂</span> Posizione delle Orecchie (Ear Position)</h5>
+                <p id="earMetric" class="au-metric">Ratio: --</p>
+                <p id="earDesc" class="au-desc">Dritte, leggermente allargate o piatte/ruotate</p>
+              </div>
+              <div id="earScoreBadge" class="au-badge-score score-0">-</div>
+            </div>
+
+            <!-- Orbital Tightening -->
+            <div class="au-card">
+              <div class="au-info">
+                <h5><span>👁️</span> Chiusura Orbitale (Orbital Tightening)</h5>
+                <p id="eyeMetric" class="au-metric">EAR: --</p>
+                <p id="eyeDesc" class="au-desc">Occhi aperti, socchiusi o fessura marcata</p>
+              </div>
+              <div id="eyeScoreBadge" class="au-badge-score score-0">-</div>
+            </div>
+
+            <!-- Muzzle Tension -->
+            <div class="au-card">
+              <div class="au-info">
+                <h5><span>🐱</span> Tensione del Muso (Muzzle Tension)</h5>
+                <p id="muzzleMetric" class="au-metric">Ratio: --</p>
+                <p id="muzzleDesc" class="au-desc">Rilassato/rotondo, moderato o ellittico/teso</p>
+              </div>
+              <div id="muzzleScoreBadge" class="au-badge-score score-0">-</div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Semantic Reasoner Trace Card -->
+        <div class="reasoner-trace-card">
+          <div class="trace-title">
+            <span>🔬</span> Traccia Inferenza Ontologica (SWRL Reasoner)
+          </div>
+          <div id="swrlRuleCode" class="code-block">
+Cat(?c) ^ hasTotalScore(?c, ?s) ^ lessThanOrEqual(?s, 1) -> hasHealthStatus(?c, Good)
+          </div>
+          <div id="reasonerTime" class="trace-meta">
+            Reasoner: Pellet / OWL DL • Regole Semantiche FGS Attive
+          </div>
+        </div>
+
+      </section>
+
+    </div>
+  </main>
+
+  <!-- Client Script -->
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
